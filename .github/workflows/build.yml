@@ -1,0 +1,258 @@
+name: Build TWRP-Flashable Zip from Samsung Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'Direct URL to the Samsung firmware .zip/.tar.md5 (e.g. SamFirm/Frija output link)'
+        required: true
+        type: string
+      device_codename:
+        description: 'Device codename (e.g. a52sxq, or i9300 for old devices)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Check disk space (after cleanup)
+        run: df -h
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-pip \
+            liblz4-tool lz4 \
+            brotli \
+            zip unzip p7zip-full \
+            android-sdk-libsparse-utils
+          pip3 install --user lpunpack requests tqdm
+          # erofs-utils — needed only for newer devices; harmless to build even if unused
+          git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
+          cd erofs-utils && make -j"$(nproc)" && sudo make install
+          cd ..
+
+      - name: Download firmware
+        run: |
+          mkdir -p work/firmware
+          cd work/firmware
+          curl -L -o firmware.zip "${{ inputs.firmware_url }}"
+          ls -lh
+
+      - name: Extract firmware archive
+        run: |
+          cd work/firmware
+          # handles both a plain zip wrapper (SamFirm/Frija) and a raw tar.md5
+          if unzip -l firmware.zip >/dev/null 2>&1; then
+            unzip firmware.zip -d extracted
+          else
+            mkdir extracted && mv firmware.zip extracted/AP.tar.md5
+          fi
+          ls -lh extracted
+
+      - name: Untar AP (bootloader/boot/recovery/system/etc.)
+        run: |
+          cd work/firmware/extracted
+          AP_FILE=$(ls AP_*.tar.md5 AP.tar.md5 2>/dev/null | head -n1)
+          mkdir -p ap_extracted
+          tar -xvf "$AP_FILE" -C ap_extracted
+          ls -lh ap_extracted
+
+      - name: Detect firmware generation
+        id: detect
+        run: |
+          cd work/firmware/extracted/ap_extracted
+          # Newer devices: dynamic partitions in a single super.img (raw or lz4)
+          if ls super.img* >/dev/null 2>&1; then
+            echo "layout=dynamic" >> "$GITHUB_OUTPUT"
+          # Mid-era devices: separate system.img/vendor.img, often lz4-compressed
+          elif ls system.img* vendor.img* >/dev/null 2>&1; then
+            echo "layout=legacy_split" >> "$GITHUB_OUTPUT"
+          # Old devices: plain ext4 sparse images, no compression, no vendor split
+          else
+            echo "layout=legacy_plain" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected layout: $(cat "$GITHUB_OUTPUT")"
+
+      - name: Decompress boot-chain images (all generations)
+        run: |
+          cd work/firmware/extracted/ap_extracted
+          mkdir -p ../raw_images
+          for base in boot recovery vendor_boot dtbo dtb; do
+            for ext in img.lz4 img; do
+              f="${base}.${ext}"
+              if [ -f "$f" ]; then
+                if [[ "$f" == *.lz4 ]]; then
+                  lz4 -d "$f" "../raw_images/${base}.img"
+                else
+                  cp "$f" "../raw_images/${base}.img"
+                fi
+                break
+              fi
+            done
+          done
+          ls -lh ../raw_images
+
+      - name: Unpack dynamic partitions (new devices, super.img)
+        if: steps.detect.outputs.layout == 'dynamic'
+        run: |
+          cd work/firmware/extracted/ap_extracted
+          SUPER_FILE=$(ls super.img.lz4 super.img 2>/dev/null | head -n1)
+          if [[ "$SUPER_FILE" == *.lz4 ]]; then
+            lz4 -d "$SUPER_FILE" ../raw_images/super.img
+          else
+            cp "$SUPER_FILE" ../raw_images/super.img
+          fi
+          cd ../raw_images
+          simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
+          python3 -m lpunpack super.img.raw unpacked_super
+          # normalize: bring unpacked system/vendor/product images up to raw_images/
+          find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
+          rm -f super.img.raw
+          ls -lh
+
+      - name: Decompress split system/vendor (mid-era devices)
+        if: steps.detect.outputs.layout == 'legacy_split'
+        run: |
+          cd work/firmware/extracted/ap_extracted
+          for base in system vendor cache; do
+            for ext in img.lz4 img; do
+              f="${base}.${ext}"
+              if [ -f "$f" ]; then
+                if [[ "$f" == *.lz4 ]]; then
+                  lz4 -d "$f" "../raw_images/${base}.img"
+                else
+                  cp "$f" "../raw_images/${base}.img"
+                fi
+                break
+              fi
+            done
+          done
+          ls -lh ../raw_images
+
+      - name: Convert sparse ext4 images to raw (old plain-image devices)
+        if: steps.detect.outputs.layout == 'legacy_plain'
+        run: |
+          cd work/firmware/extracted/ap_extracted
+          for base in system cache hidden factoryfs; do
+            f="${base}.img"
+            if [ -f "$f" ]; then
+              # old sparse images need simg2img; plain ext4 ones pass through unchanged
+              simg2img "$f" "../raw_images/${base}.img" 2>/dev/null || cp "$f" "../raw_images/${base}.img"
+            fi
+          done
+          ls -lh ../raw_images
+
+      - name: Generate device-aware updater-script
+        run: |
+          cd work/firmware/raw_images
+          echo "# Auto-generated partition dd map for ${{ inputs.device_codename }}" > partitions.list
+          for f in *.img; do
+            [ -f "$f" ] && echo "${f%.img}" >> partitions.list
+          done
+          cat partitions.list
+
+      - name: Assemble TWRP-flashable zip
+        run: |
+          mkdir -p work/twrp_zip/META-INF/com/google/android
+          cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
+
+          {
+            echo '#!/sbin/sh'
+            echo '# Auto-generated flasher — partition-by-name dd, works across old and new layouts'
+            echo 'OUTFD=$2'
+            echo 'ZIPFILE=$3'
+            echo 'ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }'
+            echo 'ui_print "Flashing ${{ inputs.device_codename }} stock firmware..."'
+            echo 'mkdir -p /tmp/twrp_zip && cd /tmp/twrp_zip'
+            echo 'unzip -o "$ZIPFILE" -d /tmp/twrp_zip >/dev/null'
+            while read -r part; do
+              echo "[ -f /tmp/twrp_zip/${part}.img ] && ui_print 'Flashing ${part}...' && dd if=/tmp/twrp_zip/${part}.img of=/dev/block/bootdevice/by-name/${part} 2>/dev/null || true"
+            done < work/firmware/raw_images/partitions.list
+            echo 'ui_print "Done. Reboot when ready."'
+            echo 'exit 0'
+          } > work/twrp_zip/META-INF/com/google/android/update-binary
+
+          chmod 755 work/twrp_zip/META-INF/com/google/android/update-binary
+          echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
+
+          cd work/twrp_zip
+          zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable.zip" .
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.device_codename }}-twrp-flashable
+          path: ${{ inputs.device_codename }}-twrp-flashable.zip
+          retention-days: 7
+
+      - name: Package raw .img outputs for release
+        run: |
+          mkdir -p release_imgs
+          cp work/firmware/raw_images/*.img release_imgs/ 2>/dev/null || true
+          cd release_imgs
+          for f in *.img; do
+            [ -f "$f" ] && zip -9 "../${{ inputs.device_codename }}-${f%.img}.img.zip" "$f"
+          done
+          cd ..
+          ls -lh *.img.zip 2>/dev/null || echo "No raw images produced."
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ inputs.device_codename }}-${{ github.run_number }}"
+          name: "${{ inputs.device_codename }} TWRP flashable (build ${{ github.run_number }})"
+          body: |
+            Auto-built from firmware source: ${{ inputs.firmware_url }}
+
+            Contains:
+            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP
+            - Individual `.img.zip` files per extracted partition
+          files: |
+            ${{ inputs.device_codename }}-twrp-flashable.zip
+            *.img.zip
+          fail_on_unmatched_files: false
+
+      - name: Stage generated source
+        run: |
+          mkdir -p "devices/${{ inputs.device_codename }}"
+          cp work/twrp_zip/META-INF/com/google/android/update-binary "devices/${{ inputs.device_codename }}/update-binary"
+          cp work/twrp_zip/META-INF/com/google/android/updater-script "devices/${{ inputs.device_codename }}/updater-script"
+          cp work/firmware/raw_images/partitions.list "devices/${{ inputs.device_codename }}/partitions.list"
+          cp "${{ inputs.device_codename }}-twrp-flashable.zip" "devices/${{ inputs.device_codename }}/"
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Add generated TWRP flashable for ${{ inputs.device_codename }}"
+          title: "TWRP flashable: ${{ inputs.device_codename }}"
+          body: |
+            Auto-generated by the firmware build workflow for `${{ inputs.device_codename }}`.
+
+            Includes:
+            - `update-binary` (partition-by-name dd flasher)
+            - `updater-script`
+            - `partitions.list` (detected partitions for this build)
+            - `${{ inputs.device_codename }}-twrp-flashable.zip`
+          branch: "twrp-flashable/${{ inputs.device_codename }}"
+          base: main
+          add-paths: "devices/${{ inputs.device_codename }}/**"
+          delete-branch: true
