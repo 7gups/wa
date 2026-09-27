@@ -50,11 +50,9 @@ jobs:
             brotli \
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
-            e2fsprogs
+            e2fsprogs \
+            erofs-utils
           pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser gdown
-          git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
-          cd erofs-utils && make -j"$(nproc)" && sudo make install
-          cd ..
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download firmware
