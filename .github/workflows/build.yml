@@ -186,6 +186,14 @@ jobs:
             exit 1
           fi
           chmod +x magisk_extract/magiskboot magisk_extract/magiskinit magisk_extract/magisk64 magisk_extract/magisk32
+          # boot_patch.sh invokes the bundled binaries with a literal "./" prefix, so
+          # they must live in the SAME directory boot_patch.sh runs from — a PATH
+          # entry pointing at magisk_extract/ is not enough.
+          cp magisk_extract/magiskboot .
+          cp magisk_extract/magiskinit .
+          cp magisk_extract/magisk64 .
+          cp magisk_extract/magisk32 .
+          chmod +x magiskboot magiskinit magisk64 magisk32
           # boot_patch.sh sources util_functions.sh from its own directory (and expects
           # stub.apk alongside it too), so all three must be copied together, not just
           # boot_patch.sh on its own.
@@ -193,10 +201,19 @@ jobs:
           cp magisk_extract/assets/util_functions.sh .
           cp magisk_extract/assets/stub.apk . 2>/dev/null || true
           export ASSETDIR="$(pwd)/magisk_extract/assets"
-          export PATH="$(pwd)/magisk_extract:$PATH"
+          export PATH="$(pwd):$(pwd)/magisk_extract:$PATH"
+          # dos2unix/getprop are normally device/recovery utilities boot_patch.sh
+          # expects on PATH; stub them out since neither exists on a plain CI runner.
+          printf '#!/bin/sh\ncat "$@"\n' > dos2unix && chmod +x dos2unix
+          printf '#!/bin/sh\necho ""\n' > getprop && chmod +x getprop
+          # BOOTMODE=true tells boot_patch.sh it is NOT running inside TWRP/recovery,
+          # which switches its ui_print to plain echo instead of writing to
+          # /proc/self/fd/$OUTFD (undefined here, which is what causes
+          # "cannot create /proc/self/fd/: Is a directory"). OUTFD=1 is set as a
+          # belt-and-braces fallback in case any code path still writes to it.
           # KEEPVERITY/KEEPFORCEENCRYPT off is the common default for custom-flash setups;
           # flip to true if your device needs stock verity/encryption behavior preserved
-          KEEPVERITY=false KEEPFORCEENCRYPT=false sh boot_patch.sh boot.img
+          BOOTMODE=true OUTFD=1 KEEPVERITY=false KEEPFORCEENCRYPT=false sh boot_patch.sh boot.img
           if [ -f new-boot.img ]; then
             # Write the patched image to its own file rather than overwriting boot.img,
             # so the main/stock zips stay unrooted and only the dedicated rooted zip
@@ -416,21 +433,4 @@ jobs:
             echo 'mkdir -p /tmp/twrp_zip && cd /tmp/twrp_zip'
             echo 'unzip -o "$ZIPFILE" -d /tmp/twrp_zip >/dev/null'
             while read -r part; do
-              echo "[ -f /tmp/twrp_zip/${part}.img ] && ui_print 'Flashing ${part}...' && dd if=/tmp/twrp_zip/${part}.img of=/dev/block/bootdevice/by-name/${part} 2>/dev/null || true"
-            done < work/firmware/raw_images/partitions.list
-            echo 'ui_print "Done. Reboot when ready."'
-            echo 'exit 0'
-          } > work/twrp_zip/META-INF/com/google/android/update-binary
-          chmod 755 work/twrp_zip/META-INF/com/google/android/update-binary
-          echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
-          cd work/twrp_zip
-          zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable.zip" .
-      - name: Assemble stock (GApps-intact) TWRP-flashable zip
-        if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
-        run: |
-          mkdir -p work/twrp_zip_stock/META-INF/com/google/android
-          cp -r work/firmware/raw_images_stock/*.img work/twrp_zip_stock/ 2>/dev/null || true
-          rm -f work/twrp_zip_stock/boot-magisk.img
-          {
-            echo '#!/sbin/sh'
-            echo '# Auto-generated flasher — partition-by-name dd, works across old and new 
+              echo "[ -f /t
