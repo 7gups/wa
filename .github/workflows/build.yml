@@ -117,15 +117,16 @@ jobs:
           echo "Found AP file: $AP_FILE"
           mkdir -p ap_extracted
           tar -xvf "$AP_FILE" -C ap_extracted
-          ls -lh ap_extracted
+          echo "Full contents of ap_extracted (recursive):"
+          find ap_extracted
 
       - name: Detect firmware generation
         id: detect
         run: |
           cd work/firmware/extracted/ap_extracted
-          if ls super.img* >/dev/null 2>&1; then
+          if find . -iname 'super.img*' | grep -q .; then
             echo "layout=dynamic" >> "$GITHUB_OUTPUT"
-          elif ls system.img* vendor.img* >/dev/null 2>&1; then
+          elif find . -iname 'system.img*' | grep -q . && find . -iname 'vendor.img*' | grep -q .; then
             echo "layout=legacy_split" >> "$GITHUB_OUTPUT"
           else
             echo "layout=legacy_plain" >> "$GITHUB_OUTPUT"
@@ -137,8 +138,8 @@ jobs:
           cd work/firmware/extracted/ap_extracted
           mkdir -p ../../raw_images
 
-          for f in *.img.lz4 *.img; do
-            [ -e "$f" ] || continue
+          find . -type f \( -iname '*.img.lz4' -o -iname '*.img' \) -print0 | while IFS= read -r -d '' path; do
+            f=$(basename "$path")
             case "$f" in
               super.img|super.img.lz4) continue ;;
             esac
@@ -146,23 +147,32 @@ jobs:
             if [[ "$f" == *.img.lz4 ]]; then
               base="${f%.img.lz4}"
               [ -f "../../raw_images/${base}.img" ] && continue
-              lz4 -d "$f" "../../raw_images/${base}.img.raw"
+              lz4 -d "$path" "../../raw_images/${base}.img.raw"
               simg2img "../../raw_images/${base}.img.raw" "../../raw_images/${base}.img" 2>/dev/null \
                 || mv "../../raw_images/${base}.img.raw" "../../raw_images/${base}.img"
               rm -f "../../raw_images/${base}.img.raw"
             else
               base="${f%.img}"
-              simg2img "$f" "../../raw_images/${base}.img" 2>/dev/null || cp "$f" "../../raw_images/${base}.img"
+              [ -f "../../raw_images/${base}.img" ] && continue
+              simg2img "$path" "../../raw_images/${base}.img" 2>/dev/null || cp "$path" "../../raw_images/${base}.img"
             fi
           done
+
           echo "Collected partition images:"
           ls -lh ../../raw_images
+
+          if ! ls ../../raw_images/*.img >/dev/null 2>&1; then
+            echo "ERROR: no partition images were collected from the extracted AP tar."
+            echo "Full tar contents were listed in the previous step's log — check there for"
+            echo "what this firmware actually ships (unexpected filenames, nested folders, etc.)."
+            exit 1
+          fi
 
       - name: Unpack dynamic partitions (new devices, super.img)
         if: steps.detect.outputs.layout == 'dynamic'
         run: |
           cd work/firmware/extracted/ap_extracted
-          SUPER_FILE=$(ls super.img.lz4 super.img 2>/dev/null | head -n1)
+          SUPER_FILE=$(find . -iname 'super.img.lz4' -o -iname 'super.img' | head -n1)
           if [[ "$SUPER_FILE" == *.lz4 ]]; then
             lz4 -d "$SUPER_FILE" ../../raw_images/super.img
           else
@@ -183,11 +193,9 @@ jobs:
           cp -a work/firmware/raw_images/. work/firmware/raw_images_stock/
           ls -lh work/firmware/raw_images_stock
 
-      - name: Remove Google apps (GApps)
+      - name: Write GApps package list
         if: inputs.debloat_google_apps == true
         run: |
-          cd work/firmware/raw_images
-
           cat > /tmp/google_pkg_patterns.txt <<'EOF'
           com.google.android.gms
           com.google.android.gsf
@@ -212,7 +220,12 @@ jobs:
           com.google.android.feedback
           com.google.android.ims
           EOF
+          echo "Package patterns to remove:"
+          cat /tmp/google_pkg_patterns.txt
 
+      - name: Write GApps matcher and setup-wizard patch scripts
+        if: inputs.debloat_google_apps == true
+        run: |
           cat > /tmp/find_google_pkgs.py <<'PYEOF'
           import sys, os
           from pyaxmlparser import APK
@@ -254,35 +267,54 @@ jobs:
           SHEOF
           chmod +x /tmp/patch_setupwizard_flag.sh
 
-          for part in system vendor product; do
-            IMG="${part}.img"
-            [ -f "$IMG" ] || continue
-            MNT="mnt_${part}"
-            mkdir -p "$MNT"
-            FSTYPE=$(file -b "$IMG" 2>/dev/null || echo unknown)
+      - name: Remove Google apps from system/vendor/product
+        if: inputs.debloat_google_apps == true
+        run: |
+          cd work/firmware/raw_images
 
-            if echo "$FSTYPE" | grep -qi erofs; then
-              dump.erofs --extract="$MNT" "$IMG" >/dev/null 2>&1 || sudo fsck.erofs --extract="$MNT" "$IMG"
-              python3 /tmp/find_google_pkgs.py "$MNT"
+          patch_partition() {
+            local part="$1"
+            local img="${part}.img"
+            local mnt="mnt_${part}"
+            [ -f "$img" ] || return 0
+
+            mkdir -p "$mnt"
+            local fstype
+            fstype=$(file -b "$img" 2>/dev/null || echo unknown)
+
+            if echo "$fstype" | grep -qi erofs; then
+              dump.erofs --extract="$mnt" "$img" >/dev/null 2>&1 || sudo fsck.erofs --extract="$mnt" "$img"
+              python3 /tmp/find_google_pkgs.py "$mnt"
               while read -r d; do [ -n "$d" ] && rm -rf "$d"; done < /tmp/dirs_to_remove.txt
-              if [ "$part" = "system" ]; then
-                PROP=$(find "$MNT" -maxdepth 3 -name build.prop | head -n1)
-                [ -n "$PROP" ] && bash /tmp/patch_setupwizard_flag.sh "$PROP"
-              fi
-              mkfs.erofs "$IMG.new" "$MNT" && mv "$IMG.new" "$IMG"
+              patch_setupwizard_if_system "$part" "$mnt" find
+              mkfs.erofs "$img.new" "$mnt" && mv "$img.new" "$img"
             else
-              cp "$IMG" "$IMG.rw"
-              sudo mount -o loop,rw "$IMG.rw" "$MNT"
-              sudo python3 /tmp/find_google_pkgs.py "$MNT"
+              cp "$img" "$img.rw"
+              sudo mount -o loop,rw "$img.rw" "$mnt"
+              sudo python3 /tmp/find_google_pkgs.py "$mnt"
               while read -r d; do [ -n "$d" ] && sudo rm -rf "$d"; done < /tmp/dirs_to_remove.txt
-              if [ "$part" = "system" ]; then
-                PROP=$(sudo find "$MNT" -maxdepth 3 -name build.prop | head -n1)
-                [ -n "$PROP" ] && sudo bash /tmp/patch_setupwizard_flag.sh "$PROP"
-              fi
-              sudo umount "$MNT"
-              mv "$IMG.rw" "$IMG"
+              patch_setupwizard_if_system "$part" "$mnt" sudo_find
+              sudo umount "$mnt"
+              mv "$img.rw" "$img"
             fi
-            rm -rf "$MNT"
+            rm -rf "$mnt"
+          }
+
+          patch_setupwizard_if_system() {
+            local part="$1" mnt="$2" mode="$3"
+            [ "$part" = "system" ] || return 0
+            local prop
+            if [ "$mode" = "sudo_find" ]; then
+              prop=$(sudo find "$mnt" -maxdepth 3 -name build.prop | head -n1)
+              [ -n "$prop" ] && sudo bash /tmp/patch_setupwizard_flag.sh "$prop"
+            else
+              prop=$(find "$mnt" -maxdepth 3 -name build.prop | head -n1)
+              [ -n "$prop" ] && bash /tmp/patch_setupwizard_flag.sh "$prop"
+            fi
+          }
+
+          for part in system vendor product; do
+            patch_partition "$part"
           done
           ls -lh
 
@@ -324,22 +356,25 @@ jobs:
           done
           cat partitions.list
 
-      - name: Assemble TWRP-flashable zip
-        env:
-          DEVICE_CODENAME: ${{ inputs.device_codename }}
+      - name: Write shared update-binary generator
         run: |
-          mkdir -p work/twrp_zip/META-INF/com/google/android
-          cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
+          cat > /tmp/gen_update_binary.sh <<'GENEOF'
+          #!/bin/bash
+          set -e
+          BIN="$1"
+          STAGING_DIR="$2"
+          DEVICE_NAME="$3"
+          BANNER_SUFFIX="$4"
+          PARTITIONS_LIST="$5"
 
-          BIN=work/twrp_zip/META-INF/com/google/android/update-binary
           cat > "$BIN" <<'BINEOF'
           #!/sbin/sh
           OUTFD=$2
           ZIPFILE=$3
           ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }
-          ui_print "Flashing @@DEVICE@@ stock firmware..."
-          mkdir -p /tmp/twrp_zip && cd /tmp/twrp_zip
-          unzip -o "$ZIPFILE" -d /tmp/twrp_zip >/dev/null
+          ui_print "Flashing @@DEVICE@@ stock firmware@@SUFFIX@@..."
+          mkdir -p @@STAGING@@ && cd @@STAGING@@
+          unzip -o "$ZIPFILE" -d @@STAGING@@ >/dev/null
 
           BYNAME=""
           for candidate in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
@@ -356,12 +391,12 @@ jobs:
           ui_print "Using partition path: $BYNAME"
           BINEOF
 
-          sed -i "s/@@DEVICE@@/${DEVICE_CODENAME}/" "$BIN"
+          sed -i "s/@@DEVICE@@/${DEVICE_NAME}/;s/@@SUFFIX@@/${BANNER_SUFFIX}/g;s#@@STAGING@@#${STAGING_DIR}#g" "$BIN"
 
           while read -r part; do
-            printf '[ -f /tmp/twrp_zip/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip/%s.img of="$BYNAME"/%s 2>/dev/null || true\n' \
-              "$part" "$part" "$part" "$part" >> "$BIN"
-          done < work/firmware/raw_images/partitions.list
+            printf '[ -f %s/%s.img ] && ui_print "Flashing %s..." && dd if=%s/%s.img of="$BYNAME"/%s 2>/dev/null || true\n' \
+              "$STAGING_DIR" "$part" "$part" "$STAGING_DIR" "$part" "$part" >> "$BIN"
+          done < "$PARTITIONS_LIST"
 
           {
             echo 'ui_print "Done. Reboot when ready."'
@@ -369,6 +404,18 @@ jobs:
           } >> "$BIN"
 
           chmod 755 "$BIN"
+          GENEOF
+          chmod +x /tmp/gen_update_binary.sh
+
+      - name: Assemble TWRP-flashable zip
+        env:
+          DEVICE_CODENAME: ${{ inputs.device_codename }}
+        run: |
+          mkdir -p work/twrp_zip/META-INF/com/google/android
+          cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
+
+          BIN=work/twrp_zip/META-INF/com/google/android/update-binary
+          /tmp/gen_update_binary.sh "$BIN" /tmp/twrp_zip "$DEVICE_CODENAME" "" work/firmware/raw_images/partitions.list
           echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
 
           cd work/twrp_zip
@@ -383,43 +430,7 @@ jobs:
           cp -r work/firmware/raw_images_stock/*.img work/twrp_zip_stock/ 2>/dev/null || true
 
           BIN=work/twrp_zip_stock/META-INF/com/google/android/update-binary
-          cat > "$BIN" <<'BINEOF'
-          #!/sbin/sh
-          OUTFD=$2
-          ZIPFILE=$3
-          ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }
-          ui_print "Flashing @@DEVICE@@ stock firmware (GApps intact)..."
-          mkdir -p /tmp/twrp_zip_stock && cd /tmp/twrp_zip_stock
-          unzip -o "$ZIPFILE" -d /tmp/twrp_zip_stock >/dev/null
-
-          BYNAME=""
-          for candidate in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
-            if [ -d "$candidate" ]; then
-              BYNAME="$candidate"
-              break
-            fi
-          done
-          if [ -z "$BYNAME" ]; then
-            ui_print "ERROR: no by-name partition directory found on this device."
-            ui_print "This device's SoC uses a partition layout this zip doesn't recognize."
-            exit 1
-          fi
-          ui_print "Using partition path: $BYNAME"
-          BINEOF
-
-          sed -i "s/@@DEVICE@@/${DEVICE_CODENAME}/" "$BIN"
-
-          while read -r part; do
-            printf '[ -f /tmp/twrp_zip_stock/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip_stock/%s.img of="$BYNAME"/%s 2>/dev/null || true\n' \
-              "$part" "$part" "$part" "$part" >> "$BIN"
-          done < work/firmware/raw_images/partitions.list
-
-          {
-            echo 'ui_print "Done. Reboot when ready."'
-            echo 'exit 0'
-          } >> "$BIN"
-
-          chmod 755 "$BIN"
+          /tmp/gen_update_binary.sh "$BIN" /tmp/twrp_zip_stock "$DEVICE_CODENAME" " (GApps intact)" work/firmware/raw_images/partitions.list
           echo "# placeholder — update-binary does the real work" > work/twrp_zip_stock/META-INF/com/google/android/updater-script
 
           cd work/twrp_zip_stock
@@ -487,4 +498,3 @@ jobs:
           base: main
           add-paths: "devices/${{ inputs.device_codename }}/**"
           delete-branch: true
-          
