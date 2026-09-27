@@ -72,7 +72,7 @@ jobs:
               echo "ERROR: could not extract a Drive file ID from firmware_url."
               exit 1
             fi
-            gdown --id "$FILE_ID" -O firmware.zip --fuzzy
+            gdown -O firmware.zip "$FILE_ID"
           else
             curl -fL -o firmware.zip "$FIRMWARE_URL"
           fi
