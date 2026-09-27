@@ -61,31 +61,17 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-
-          python3 -m pip install --user requests tqdm pyaxmlparser
-
-          # lpunpack is provided by android-sdk-libsparse-utils package
-          if ! command -v lpunpack >/dev/null 2>&1; then
-            echo "ERROR: lpunpack was not found after installing android-sdk-libsparse-utils"
-            dpkg -L android-sdk-libsparse-utils || true
-            exit 1
-          fi
-
-          echo "Using lpunpack: $(command -v lpunpack)"
-          lpunpack --help || true
-
+          pip3 install --user --break-system-packages lpunpack requests tqdm pyaxmlparser
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
-          cd "$GITHUB_WORKSPACE"
-
+          cd ..
       - name: Download firmware
         run: |
           mkdir -p work/firmware
           cd work/firmware
           curl -L -o firmware.zip "${{ inputs.firmware_url }}"
           ls -lh
-
       - name: Extract firmware archive
         run: |
           cd work/firmware
@@ -96,7 +82,6 @@ jobs:
             mkdir extracted && mv firmware.zip extracted/AP.tar.md5
           fi
           ls -lh extracted
-
       - name: Untar AP (bootloader/boot/recovery/system/etc.)
         run: |
           cd work/firmware/extracted
@@ -104,7 +89,6 @@ jobs:
           mkdir -p ap_extracted
           tar -xvf "$AP_FILE" -C ap_extracted
           ls -lh ap_extracted
-
       - name: Detect firmware generation
         id: detect
         run: |
@@ -120,7 +104,6 @@ jobs:
             echo "layout=legacy_plain" >> "$GITHUB_OUTPUT"
           fi
           echo "Detected layout: $(cat "$GITHUB_OUTPUT")"
-
       - name: Decompress boot-chain images (all generations)
         run: |
           cd work/firmware/extracted/ap_extracted
@@ -139,7 +122,6 @@ jobs:
             done
           done
           ls -lh ../raw_images
-
       - name: Patch boot.img with Magisk (arm64-v8a + armeabi-v7a)
         if: inputs.patch_with_magisk == true
         run: |
@@ -153,19 +135,16 @@ jobs:
           curl -L -o magisk.apk "$MAGISK_URL"
           mkdir -p magisk_extract
           unzip -o magisk.apk -d magisk_extract >/dev/null
-
           # magiskboot/magiskinit are host tools — they run ON the CI runner, so they
           # must match the RUNNER's arch (x86_64), never the target device's arch.
           cp magisk_extract/lib/x86_64/libmagiskboot.so magisk_extract/magiskboot
           cp magisk_extract/lib/x86_64/libmagiskinit.so magisk_extract/magiskinit
-
           # magisk64/magisk32 are the payload binaries that get embedded in the patched
           # boot image and actually run ON the device — bundling both covers 64-bit-only
           # devices (arm64-v8a) and older 32-bit devices (armeabi-v7a) in one build.
           # boot_patch.sh auto-selects the right one for the target device at flash/boot time.
           cp magisk_extract/lib/arm64-v8a/libmagisk64.so magisk_extract/magisk64
           cp magisk_extract/lib/armeabi-v7a/libmagisk32.so magisk_extract/magisk32
-
           chmod +x magisk_extract/magiskboot magisk_extract/magiskinit magisk_extract/magisk64 magisk_extract/magisk32
           cp magisk_extract/assets/boot_patch.sh .
           cp boot.img stock_boot.img
@@ -182,16 +161,11 @@ jobs:
             cp stock_boot.img boot.img
           fi
           ls -lh boot.img stock_boot.img
-
       - name: Unpack dynamic partitions (new devices, super.img)
         if: steps.detect.outputs.layout == 'dynamic'
         run: |
           cd work/firmware/extracted/ap_extracted
           SUPER_FILE=$(ls super.img.lz4 super.img 2>/dev/null | head -n1)
-          if [ -z "$SUPER_FILE" ]; then
-            echo "ERROR: super.img was expected but could not be found"
-            exit 1
-          fi
           if [[ "$SUPER_FILE" == *.lz4 ]]; then
             lz4 -d "$SUPER_FILE" ../raw_images/super.img
           else
@@ -199,14 +173,11 @@ jobs:
           fi
           cd ../raw_images
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
-          rm -rf unpacked_super
-          mkdir -p unpacked_super
-          lpunpack super.img.raw unpacked_super
-          # Normalize unpacked partitions into raw_images/.
-          find unpacked_super -maxdepth 1 -type f -name '*.img' -exec cp {} . \;
+          python3 -m lpunpack super.img.raw unpacked_super
+          # normalize: bring unpacked system/vendor/product images up to raw_images/
+          find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
           rm -f super.img.raw
           ls -lh
-
       - name: Decompress split system/vendor (mid-era devices)
         if: steps.detect.outputs.layout == 'legacy_split'
         run: |
@@ -225,7 +196,6 @@ jobs:
             done
           done
           ls -lh ../raw_images
-
       - name: Convert sparse ext4 images to raw (old plain-image devices)
         if: steps.detect.outputs.layout == 'legacy_plain'
         run: |
@@ -238,19 +208,16 @@ jobs:
             fi
           done
           ls -lh ../raw_images
-
       - name: Backup stock partition images (pre-GApps-removal)
         if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
           mkdir -p work/firmware/raw_images_stock
           cp -a work/firmware/raw_images/. work/firmware/raw_images_stock/
           ls -lh work/firmware/raw_images_stock
-
       - name: Remove Google apps (GApps)
         if: inputs.debloat_google_apps == true
         run: |
           cd work/firmware/raw_images
-
           # Real Google package IDs (from the app's AndroidManifest.xml), not folder
           # names — folder names vary by OEM build and aren't reliable to match on.
           cat > /tmp/google_pkg_patterns.txt <<'EOF'
@@ -277,15 +244,12 @@ jobs:
           com.google.android.feedback
           com.google.android.ims
           EOF
-
           cat > /tmp/find_google_pkgs.py <<'PYEOF'
           import sys, os
           from pyaxmlparser import APK
-
           mount_root = sys.argv[1]
           with open("/tmp/google_pkg_patterns.txt") as f:
               targets = {line.strip() for line in f if line.strip()}
-
           to_remove = []
           for dirpath, dirnames, filenames in os.walk(mount_root):
               for fn in filenames:
@@ -299,12 +263,10 @@ jobs:
                           # remove the app's containing directory (covers base.apk + splits/oat/lib)
                           to_remove.append(dirpath)
                           print(f"MATCH  {pkg}  ->  {dirpath}")
-
           with open("/tmp/dirs_to_remove.txt", "w") as f:
               for d in sorted(set(to_remove)):
                   f.write(d + "\n")
           PYEOF
-
           cat > /tmp/patch_setupwizard_flag.sh <<'SHEOF'
           #!/bin/bash
           # Tell the framework to skip the OOBE/setup-wizard gate outright, rather than
@@ -323,14 +285,12 @@ jobs:
           echo "Patched setup-wizard bypass flags into $PROP_FILE"
           SHEOF
           chmod +x /tmp/patch_setupwizard_flag.sh
-
           for part in system vendor product; do
             IMG="${part}.img"
             [ -f "$IMG" ] || continue
             MNT="mnt_${part}"
             mkdir -p "$MNT"
             FSTYPE=$(file -b "$IMG" 2>/dev/null || echo unknown)
-
             if echo "$FSTYPE" | grep -qi erofs; then
               dump.erofs --extract="$MNT" "$IMG" >/dev/null 2>&1 || sudo fsck.erofs --extract="$MNT" "$IMG"
               python3 /tmp/find_google_pkgs.py "$MNT"
@@ -355,7 +315,6 @@ jobs:
             rm -rf "$MNT"
           done
           ls -lh
-
       - name: Apply build.prop overrides and file overlay
         if: inputs.buildprop_overrides != ''
         run: |
@@ -386,7 +345,6 @@ jobs:
           sudo umount mnt_system
           mv system.img.rw system.img
           rm -rf mnt_system
-
       - name: Generate device-aware updater-script
         run: |
           cd work/firmware/raw_images
@@ -395,12 +353,10 @@ jobs:
             [ -f "$f" ] && echo "${f%.img}" >> partitions.list
           done
           cat partitions.list
-
       - name: Assemble TWRP-flashable zip
         run: |
           mkdir -p work/twrp_zip/META-INF/com/google/android
           cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
-
           {
             echo '#!/sbin/sh'
             echo '# Auto-generated flasher — partition-by-name dd, works across old and new layouts'
@@ -416,19 +372,15 @@ jobs:
             echo 'ui_print "Done. Reboot when ready."'
             echo 'exit 0'
           } > work/twrp_zip/META-INF/com/google/android/update-binary
-
           chmod 755 work/twrp_zip/META-INF/com/google/android/update-binary
           echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
-
           cd work/twrp_zip
           zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable.zip" .
-
       - name: Assemble stock (GApps-intact) TWRP-flashable zip
         if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
           mkdir -p work/twrp_zip_stock/META-INF/com/google/android
           cp -r work/firmware/raw_images_stock/*.img work/twrp_zip_stock/ 2>/dev/null || true
-
           {
             echo '#!/sbin/sh'
             echo '# Auto-generated flasher — partition-by-name dd, works across old and new layouts'
@@ -444,13 +396,10 @@ jobs:
             echo 'ui_print "Done. Reboot when ready."'
             echo 'exit 0'
           } > work/twrp_zip_stock/META-INF/com/google/android/update-binary
-
           chmod 755 work/twrp_zip_stock/META-INF/com/google/android/update-binary
           echo "# placeholder — update-binary does the real work" > work/twrp_zip_stock/META-INF/com/google/android/updater-script
-
           cd work/twrp_zip_stock
           zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable-stock.zip" .
-
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
@@ -468,9 +417,16 @@ jobs:
           done
           cd ..
           ls -lh *.img.zip 2>/dev/null || echo "No raw images produced."
-
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ inputs.device_codename }}-${{ github.run_number }}"
-         
+          name: "${{ inputs.device_codename }} TWRP flashable (build ${{ github.run_number }})"
+          body: |
+            Auto-built from firmware source: ${{ inputs.firmware_url }}
+            Contains:
+            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP (GApps removed)
+            - `${{ inputs.device_codename }}-twrp-flashable-stock.zip` — same build with Google apps intact (only produced when GApps removal and stock zip inclusion are enabled)
+            - Individual `.img.zip` files per extracted partition
+          files: |
+            ${{ inputs.device_codename }}-
