@@ -51,18 +51,50 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-          pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser
+          pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser gdown
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
           cd ..
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download firmware
+        env:
+          FIRMWARE_URL: ${{ inputs.firmware_url }}
         run: |
           mkdir -p work/firmware
           cd work/firmware
-          curl -L -o firmware.zip "${{ inputs.firmware_url }}"
-          ls -lh
+
+          if echo "$FIRMWARE_URL" | grep -qE 'drive\.google\.com|drive\.usercontent\.google\.com'; then
+            echo "Detected a Google Drive link — using gdown (handles the large-file confirm/cookie flow curl can't)."
+            FILE_ID=$(echo "$FIRMWARE_URL" | grep -oP '(?:[?&]id=)\K[^&]+' | head -n1)
+            if [ -z "$FILE_ID" ]; then
+              FILE_ID=$(echo "$FIRMWARE_URL" | grep -oP '/d/\K[^/]+' | head -n1)
+            fi
+            if [ -z "$FILE_ID" ]; then
+              echo "ERROR: could not extract a Drive file ID from firmware_url."
+              exit 1
+            fi
+            gdown --id "$FILE_ID" -O firmware.zip --fuzzy
+          else
+            curl -fL -o firmware.zip "$FIRMWARE_URL"
+          fi
+
+          if [ ! -s firmware.zip ]; then
+            echo "ERROR: firmware.zip is empty or missing after download."
+            exit 1
+          fi
+
+          if head -c 200 firmware.zip | grep -qi '<html\|<!DOCTYPE'; then
+            echo "ERROR: the download returned an HTML page instead of the firmware file."
+            echo "This usually means the source link expired, requires a fresh confirm/session"
+            echo "token (common with Google Drive share links), or needs re-generating."
+            echo "First 200 bytes of what was actually downloaded:"
+            head -c 200 firmware.zip
+            exit 1
+          fi
+
+          ls -lh firmware.zip
+          file firmware.zip
 
       - name: Extract firmware archive
         run: |
@@ -480,4 +512,3 @@ jobs:
           base: main
           add-paths: "devices/${{ inputs.device_codename }}/**"
           delete-branch: true
-          
