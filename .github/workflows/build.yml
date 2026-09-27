@@ -64,12 +64,15 @@ jobs:
 
           python3 -m pip install --user requests tqdm pyaxmlparser
 
-          # Build lpunpack from Android's ext4_utils; this is the tool used later
-          git clone --depth=1 https://android.googlesource.com/platform/system/extras /tmp/android-extras
-          cd /tmp/android-extras/ext4_utils
-          make -j"$(nproc)" lpunpack
-          sudo install -m 0755 lpunpack /usr/local/bin/lpunpack
-          cd "$GITHUB_WORKSPACE"
+          # lpunpack is provided by android-sdk-libsparse-utils package
+          if ! command -v lpunpack >/dev/null 2>&1; then
+            echo "ERROR: lpunpack was not found after installing android-sdk-libsparse-utils"
+            dpkg -L android-sdk-libsparse-utils || true
+            exit 1
+          fi
+
+          echo "Using lpunpack: $(command -v lpunpack)"
+          lpunpack --help || true
 
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
@@ -185,6 +188,10 @@ jobs:
         run: |
           cd work/firmware/extracted/ap_extracted
           SUPER_FILE=$(ls super.img.lz4 super.img 2>/dev/null | head -n1)
+          if [ -z "$SUPER_FILE" ]; then
+            echo "ERROR: super.img was expected but could not be found"
+            exit 1
+          fi
           if [[ "$SUPER_FILE" == *.lz4 ]]; then
             lz4 -d "$SUPER_FILE" ../raw_images/super.img
           else
@@ -192,9 +199,11 @@ jobs:
           fi
           cd ../raw_images
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
-          python3 -m lpunpack super.img.raw unpacked_super
-          # normalize: bring unpacked system/vendor/product images up to raw_images/
-          find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
+          rm -rf unpacked_super
+          mkdir -p unpacked_super
+          lpunpack super.img.raw unpacked_super
+          # Normalize unpacked partitions into raw_images/.
+          find unpacked_super -maxdepth 1 -type f -name '*.img' -exec cp {} . \;
           rm -f super.img.raw
           ls -lh
 
@@ -464,13 +473,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ inputs.device_codename }}-${{ github.run_number }}"
-          name: "${{ inputs.device_codename }} TWRP flashable (build ${{ github.run_number }})"
-          body: |
-            Auto-built from firmware source: ${{ inputs.firmware_url }}
-
-            Contains:
-            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP (GApps removed)
-            - `${{ inputs.device_codename }}-twrp-flashable-stock.zip` — same build with Google apps intact (only produced when GApps removal and stock zip inclusion are enabled)
-            - Individual `.img.zip` files per extracted partition
-          files: |
-            ${{ inputs.device_codename }}-
+         
