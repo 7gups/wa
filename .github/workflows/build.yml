@@ -11,11 +11,6 @@ on:
         description: 'Device codename (e.g. a52sxq, or i9300 for old devices)'
         required: true
         type: string
-      patch_with_magisk:
-        description: 'Patch boot.img with Magisk (root)'
-        required: false
-        type: boolean
-        default: false
       debloat_google_apps:
         description: 'Remove Google apps (GApps) from system/vendor/product'
         required: false
@@ -118,41 +113,6 @@ jobs:
             done
           done
           ls -lh ../../raw_images
-
-      - name: Patch boot.img with Magisk (arm64-v8a + armeabi-v7a)
-        if: inputs.patch_with_magisk == true
-        run: |
-          cd work/firmware/raw_images
-          if [ ! -f boot.img ]; then
-            echo "No boot.img extracted, skipping Magisk patch."
-            exit 0
-          fi
-          MAGISK_URL=$(curl -s https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
-            | grep browser_download_url | grep '\.apk"' | cut -d '"' -f4 | head -n1)
-          curl -L -o magisk.apk "$MAGISK_URL"
-          mkdir -p magisk_extract
-          unzip -o magisk.apk -d magisk_extract >/dev/null
-
-          cp magisk_extract/lib/x86_64/libmagiskboot.so magisk_extract/magiskboot
-          cp magisk_extract/lib/x86_64/libmagiskinit.so magisk_extract/magiskinit
-
-          cp magisk_extract/lib/arm64-v8a/libmagisk64.so magisk_extract/magisk64
-          cp magisk_extract/lib/armeabi-v7a/libmagisk32.so magisk_extract/magisk32
-
-          chmod +x magisk_extract/magiskboot magisk_extract/magiskinit magisk_extract/magisk64 magisk_extract/magisk32
-          cp magisk_extract/assets/boot_patch.sh .
-          cp boot.img stock_boot.img
-          export ASSETDIR="$(pwd)/magisk_extract/assets"
-          export PATH="$(pwd)/magisk_extract:$PATH"
-          KEEPVERITY=false KEEPFORCEENCRYPT=false sh boot_patch.sh boot.img
-          if [ -f new-boot.img ]; then
-            mv new-boot.img boot.img
-            echo "Magisk patch applied (arm64-v8a + armeabi-v7a payloads bundled)."
-          else
-            echo "Magisk patch failed, keeping stock boot.img."
-            cp stock_boot.img boot.img
-          fi
-          ls -lh boot.img stock_boot.img
 
       - name: Unpack dynamic partitions (new devices, super.img)
         if: steps.detect.outputs.layout == 'dynamic'
