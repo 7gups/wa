@@ -61,11 +61,20 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-          pip3 install --user lptools requests tqdm pyaxmlparser
+
+          python3 -m pip install --user requests tqdm pyaxmlparser
+
+          # Build lpunpack from Android's ext4_utils; this is the tool used later
+          git clone --depth=1 https://android.googlesource.com/platform/system/extras /tmp/android-extras
+          cd /tmp/android-extras/ext4_utils
+          make -j"$(nproc)" lpunpack
+          sudo install -m 0755 lpunpack /usr/local/bin/lpunpack
+          cd "$GITHUB_WORKSPACE"
+
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
-          cd ..
+          cd "$GITHUB_WORKSPACE"
 
       - name: Download firmware
         run: |
