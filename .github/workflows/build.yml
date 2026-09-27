@@ -56,11 +56,17 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-          pip3 install --user lpunpack requests tqdm pyaxmlparser
+          pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser
+          # NOTE: the PyPI package is "liblp" (it installs the "lpunpack" CLI command) —
+          # a package literally named "lpunpack" does not exist on PyPI, hence the error.
+          # --break-system-packages is required on Ubuntu 24.04 runners (PEP 668).
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
           cd ..
+          # persist ~/.local/bin (where --user pip installs put console scripts, e.g. lpunpack)
+          # onto PATH for every subsequent step in this job
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download firmware
         run: |
@@ -178,7 +184,7 @@ jobs:
           fi
           cd ../raw_images
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
-          python3 -m lpunpack super.img.raw unpacked_super
+          lpunpack super.img.raw unpacked_super
           # normalize: bring unpacked system/vendor/product images up to raw_images/
           find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
           rm -f super.img.raw
@@ -472,12 +478,4 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ inputs.device_codename }}-${{ github.run_number }}"
-          name: "${{ inputs.device_codename }} TWRP flashable (build ${{ github.run_number }})"
-          body: |
-            Auto-built from firmware source: ${{ inputs.firmware_url }}
-
-            Contains:
-            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP
-            - `${{ inputs.device_codename }}-twrp-flashable-stock.zip` — same build with Google apps intact (only produced when GApps removal is enabled)
-            - Individual `.im
+          tag_name: "${{ inputs.device_codename }}-${{ github.run_number
