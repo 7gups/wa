@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       firmware_url:
-        description: 'Direct URL to the Samsung firmware .zip/.tar.md5 (e.g. SamFirm/Frija output link)'
+        description: 'Direct URL to a SamFirm/Frija-downloaded firmware .zip (the wrapper zip containing AP/BL/CP/CSC .tar.md5 files) or a raw AP .tar.md5 link'
         required: true
         type: string
       device_codename:
@@ -77,7 +77,14 @@ jobs:
       - name: Untar AP (bootloader/boot/recovery/system/etc.)
         run: |
           cd work/firmware/extracted
-          AP_FILE=$(ls AP_*.tar.md5 AP.tar.md5 2>/dev/null | head -n1)
+          AP_FILE=$(find . -type f \( -iname 'AP_*.tar.md5' -o -iname 'AP.tar.md5' \) | head -n1)
+          if [ -z "$AP_FILE" ]; then
+            echo "ERROR: no AP_*.tar.md5 file found anywhere in the extracted SamFirm/Frija zip."
+            echo "Contents of extracted/:"
+            find . -maxdepth 3
+            exit 1
+          fi
+          echo "Found AP file: $AP_FILE"
           mkdir -p ap_extracted
           tar -xvf "$AP_FILE" -C ap_extracted
           ls -lh ap_extracted
