@@ -115,21 +115,21 @@ jobs:
       - name: Decompress boot-chain images (all generations)
         run: |
           cd work/firmware/extracted/ap_extracted
-          mkdir -p ../raw_images
+          mkdir -p ../../raw_images
           for base in boot recovery vendor_boot dtbo dtb; do
             for ext in img.lz4 img; do
               f="${base}.${ext}"
               if [ -f "$f" ]; then
                 if [[ "$f" == *.lz4 ]]; then
-                  lz4 -d "$f" "../raw_images/${base}.img"
+                  lz4 -d "$f" "../../raw_images/${base}.img"
                 else
-                  cp "$f" "../raw_images/${base}.img"
+                  cp "$f" "../../raw_images/${base}.img"
                 fi
                 break
               fi
             done
           done
-          ls -lh ../raw_images
+          ls -lh ../../raw_images
       - name: Patch boot.img with Magisk (arm64-v8a + armeabi-v7a)
         if: inputs.patch_with_magisk == true
         run: |
@@ -176,11 +176,11 @@ jobs:
           cd work/firmware/extracted/ap_extracted
           SUPER_FILE=$(ls super.img.lz4 super.img 2>/dev/null | head -n1)
           if [[ "$SUPER_FILE" == *.lz4 ]]; then
-            lz4 -d "$SUPER_FILE" ../raw_images/super.img
+            lz4 -d "$SUPER_FILE" ../../raw_images/super.img
           else
-            cp "$SUPER_FILE" ../raw_images/super.img
+            cp "$SUPER_FILE" ../../raw_images/super.img
           fi
-          cd ../raw_images
+          cd ../../raw_images
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
           lpunpack super.img.raw unpacked_super
           # normalize: bring unpacked system/vendor/product images up to raw_images/
@@ -196,15 +196,15 @@ jobs:
               f="${base}.${ext}"
               if [ -f "$f" ]; then
                 if [[ "$f" == *.lz4 ]]; then
-                  lz4 -d "$f" "../raw_images/${base}.img"
+                  lz4 -d "$f" "../../raw_images/${base}.img"
                 else
-                  cp "$f" "../raw_images/${base}.img"
+                  cp "$f" "../../raw_images/${base}.img"
                 fi
                 break
               fi
             done
           done
-          ls -lh ../raw_images
+          ls -lh ../../raw_images
       - name: Convert sparse ext4 images to raw (old plain-image devices)
         if: steps.detect.outputs.layout == 'legacy_plain'
         run: |
@@ -213,10 +213,10 @@ jobs:
             f="${base}.img"
             if [ -f "$f" ]; then
               # old sparse images need simg2img; plain ext4 ones pass through unchanged
-              simg2img "$f" "../raw_images/${base}.img" 2>/dev/null || cp "$f" "../raw_images/${base}.img"
+              simg2img "$f" "../../raw_images/${base}.img" 2>/dev/null || cp "$f" "../../raw_images/${base}.img"
             fi
           done
-          ls -lh ../raw_images
+          ls -lh ../../raw_images
       - name: Backup stock partition images (pre-GApps-removal)
         if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
@@ -423,4 +423,4 @@ jobs:
           mkdir -p work/twrp_zip_rooted/META-INF/com/google/android
           cp -r work/firmware/raw_images/*.img work/twrp_zip_rooted/ 2>/dev/null || true
           # swap in the Magisk-patched boot image in place of the stock one
-          rm -f work/twrp_zip_rooted/boot
+  
