@@ -143,16 +143,48 @@ jobs:
           curl -L -o magisk.apk "$MAGISK_URL"
           mkdir -p magisk_extract
           unzip -o magisk.apk -d magisk_extract >/dev/null
-          # magiskboot/magiskinit are host tools — they run ON the CI runner, so they
-          # must match the RUNNER's arch (x86_64), never the target device's arch.
-          cp magisk_extract/lib/x86_64/libmagiskboot.so magisk_extract/magiskboot
-          cp magisk_extract/lib/x86_64/libmagiskinit.so magisk_extract/magiskinit
-          # magisk64/magisk32 are the payload binaries that get embedded in the patched
-          # boot image and actually run ON the device — bundling both covers 64-bit-only
-          # devices (arm64-v8a) and older 32-bit devices (armeabi-v7a) in one build.
-          # boot_patch.sh auto-selects the right one for the target device at flash/boot time.
-          cp magisk_extract/lib/arm64-v8a/libmagisk64.so magisk_extract/magisk64
-          cp magisk_extract/lib/armeabi-v7a/libmagisk32.so magisk_extract/magisk32
+          # Locate each required binary by filename rather than hardcoding its exact
+          # lib/<abi>/ path — Magisk has changed its APK's internal native-lib layout
+          # across major versions before, so a fixed path is fragile long-term.
+          # magiskboot is a host tool — it runs ON the CI runner, so it must be the
+          # RUNNER's arch (x86_64), never the target device's arch.
+          # magiskinit/magisk64/magisk32 are payload binaries embedded into the patched
+          # boot image and run ON the device — arm64-v8a covers 64-bit devices,
+          # armeabi-v7a covers older 32-bit devices; boot_patch.sh auto-selects at
+          # flash/boot time. Some Magisk builds name the per-ABI payload just
+          # "libmagisk.so" instead of "libmagisk64.so"/"libmagisk32.so", so both
+          # names are tried.
+          find_bin() {
+            local abi_pattern="$1"; shift
+            local match=""
+            for name in "$@"; do
+              match=$(find magisk_extract/lib -type d -iname "$abi_pattern" \
+                        -exec find {} -maxdepth 1 -iname "$name" \; 2>/dev/null | head -n1)
+              [ -n "$match" ] && { echo "$match"; return 0; }
+            done
+            return 1
+          }
+          MAGISKBOOT_SRC=$(find_bin 'x86_64' 'libmagiskboot.so')
+          MAGISKINIT_SRC=$(find_bin 'arm64-v8a' 'libmagiskinit.so')
+          MAGISK64_SRC=$(find_bin 'arm64-v8a' 'libmagisk64.so' 'libmagisk.so')
+          MAGISK32_SRC=$(find_bin 'armeabi-v7a' 'libmagisk32.so' 'libmagisk.so')
+          MISSING=0
+          for pair in "MAGISKBOOT_SRC:magiskboot" "MAGISKINIT_SRC:magiskinit" \
+                      "MAGISK64_SRC:magisk64" "MAGISK32_SRC:magisk32"; do
+            var="${pair%%:*}"; dest="${pair##*:}"
+            src="${!var}"
+            if [ -z "$src" ]; then
+              echo "ERROR: could not locate the '$dest' binary inside the Magisk APK."
+              MISSING=1
+              continue
+            fi
+            cp "$src" "magisk_extract/$dest"
+          done
+          if [ "$MISSING" = "1" ]; then
+            echo "Magisk APK's actual lib/ layout (for diagnosing a renamed/moved binary):"
+            find magisk_extract/lib -maxdepth 2
+            exit 1
+          fi
           chmod +x magisk_extract/magiskboot magisk_extract/magiskinit magisk_extract/magisk64 magisk_extract/magisk32
           cp magisk_extract/assets/boot_patch.sh .
           export ASSETDIR="$(pwd)/magisk_extract/assets"
@@ -402,25 +434,4 @@ jobs:
             echo 'ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }'
             echo 'ui_print "Flashing ${{ inputs.device_codename }} stock firmware (GApps intact)..."'
             echo 'mkdir -p /tmp/twrp_zip_stock && cd /tmp/twrp_zip_stock'
-            echo 'unzip -o "$ZIPFILE" -d /tmp/twrp_zip_stock >/dev/null'
-            while read -r part; do
-              echo "[ -f /tmp/twrp_zip_stock/${part}.img ] && ui_print 'Flashing ${part}...' && dd if=/tmp/twrp_zip_stock/${part}.img of=/dev/block/bootdevice/by-name/${part} 2>/dev/null || true"
-            done < work/firmware/raw_images/partitions.list
-            echo 'ui_print "Done. Reboot when ready."'
-            echo 'exit 0'
-          } > work/twrp_zip_stock/META-INF/com/google/android/update-binary
-          chmod 755 work/twrp_zip_stock/META-INF/com/google/android/update-binary
-          echo "# placeholder — update-binary does the real work" > work/twrp_zip_stock/META-INF/com/google/android/updater-script
-          cd work/twrp_zip_stock
-          zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable-stock.zip" .
-      - name: Assemble rooted (Magisk) TWRP-flashable zip
-        if: inputs.patch_with_magisk == true && inputs.include_rooted_zip == true
-        run: |
-          if [ ! -f work/firmware/raw_images/boot-magisk.img ]; then
-            echo "No boot-magisk.img present, skipping rooted zip."
-            exit 0
-          fi
-          mkdir -p work/twrp_zip_rooted/META-INF/com/google/android
-          cp -r work/firmware/raw_images/*.img work/twrp_zip_rooted/ 2>/dev/null || true
-          # swap in the Magisk-patched boot image in place of the stock one
-  
+            ech
