@@ -61,7 +61,7 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-          pip3 install --user lpunpack requests tqdm pyaxmlparser
+          pip3 install --user lptools requests tqdm pyaxmlparser
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
