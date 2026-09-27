@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_stock_zip:
+        description: 'Include the stock .zip with GApps intact alongside the debloated .zip'
+        required: false
+        type: boolean
+        default: true
       buildprop_overrides:
         description: 'Newline-separated key=value pairs to force into build.prop (optional)'
         required: false
@@ -217,7 +222,7 @@ jobs:
           ls -lh ../raw_images
 
       - name: Backup stock partition images (pre-GApps-removal)
-        if: inputs.debloat_google_apps == true
+        if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
           mkdir -p work/firmware/raw_images_stock
           cp -a work/firmware/raw_images/. work/firmware/raw_images_stock/
@@ -401,7 +406,7 @@ jobs:
           zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable.zip" .
 
       - name: Assemble stock (GApps-intact) TWRP-flashable zip
-        if: inputs.debloat_google_apps == true
+        if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
           mkdir -p work/twrp_zip_stock/META-INF/com/google/android
           cp -r work/firmware/raw_images_stock/*.img work/twrp_zip_stock/ 2>/dev/null || true
@@ -455,15 +460,8 @@ jobs:
             Auto-built from firmware source: ${{ inputs.firmware_url }}
 
             Contains:
-            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP
-            - `${{ inputs.device_codename }}-twrp-flashable-stock.zip` — same build with Google apps intact (only produced when GApps removal is enabled)
+            - `${{ inputs.device_codename }}-twrp-flashable.zip` — flash from TWRP (GApps removed)
+            - `${{ inputs.device_codename }}-twrp-flashable-stock.zip` — same build with Google apps intact (only produced when GApps removal and stock zip inclusion are enabled)
             - Individual `.img.zip` files per extracted partition
           files: |
-            ${{ inputs.device_codename }}-twrp-flashable*.zip
-            *.img.zip
-          fail_on_unmatched_files: false
-
-      - name: Stage generated source
-        run: |
-          mkdir -p "devices/${{ inputs.device_codename }}"
-          cp work/twrp_zip/META-INF/com/google/android/update-binary "devices/${{ inputs.device_codename
+            ${{ inputs.device_codename }}-
