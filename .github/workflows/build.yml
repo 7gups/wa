@@ -61,17 +61,19 @@ jobs:
             zip unzip p7zip-full \
             android-sdk-libsparse-utils \
             e2fsprogs
-          pip3 install --user --break-system-packages lpunpack requests tqdm pyaxmlparser
+          pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser
           # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
           cd ..
+          
       - name: Download firmware
         run: |
           mkdir -p work/firmware
           cd work/firmware
           curl -L -o firmware.zip "${{ inputs.firmware_url }}"
           ls -lh
+          
       - name: Extract firmware archive
         run: |
           cd work/firmware
@@ -82,6 +84,7 @@ jobs:
             mkdir extracted && mv firmware.zip extracted/AP.tar.md5
           fi
           ls -lh extracted
+          
       - name: Untar AP (bootloader/boot/recovery/system/etc.)
         run: |
           cd work/firmware/extracted
@@ -89,6 +92,7 @@ jobs:
           mkdir -p ap_extracted
           tar -xvf "$AP_FILE" -C ap_extracted
           ls -lh ap_extracted
+          
       - name: Detect firmware generation
         id: detect
         run: |
@@ -104,6 +108,7 @@ jobs:
             echo "layout=legacy_plain" >> "$GITHUB_OUTPUT"
           fi
           echo "Detected layout: $(cat "$GITHUB_OUTPUT")"
+          
       - name: Decompress boot-chain images (all generations)
         run: |
           cd work/firmware/extracted/ap_extracted
@@ -122,6 +127,7 @@ jobs:
             done
           done
           ls -lh ../raw_images
+          
       - name: Patch boot.img with Magisk (arm64-v8a + armeabi-v7a)
         if: inputs.patch_with_magisk == true
         run: |
@@ -161,6 +167,7 @@ jobs:
             cp stock_boot.img boot.img
           fi
           ls -lh boot.img stock_boot.img
+          
       - name: Unpack dynamic partitions (new devices, super.img)
         if: steps.detect.outputs.layout == 'dynamic'
         run: |
@@ -178,6 +185,7 @@ jobs:
           find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
           rm -f super.img.raw
           ls -lh
+          
       - name: Decompress split system/vendor (mid-era devices)
         if: steps.detect.outputs.layout == 'legacy_split'
         run: |
@@ -196,6 +204,7 @@ jobs:
             done
           done
           ls -lh ../raw_images
+          
       - name: Convert sparse ext4 images to raw (old plain-image devices)
         if: steps.detect.outputs.layout == 'legacy_plain'
         run: |
@@ -208,12 +217,14 @@ jobs:
             fi
           done
           ls -lh ../raw_images
+          
       - name: Backup stock partition images (pre-GApps-removal)
         if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
           mkdir -p work/firmware/raw_images_stock
           cp -a work/firmware/raw_images/. work/firmware/raw_images_stock/
           ls -lh work/firmware/raw_images_stock
+          
       - name: Remove Google apps (GApps)
         if: inputs.debloat_google_apps == true
         run: |
@@ -315,6 +326,7 @@ jobs:
             rm -rf "$MNT"
           done
           ls -lh
+          
       - name: Apply build.prop overrides and file overlay
         if: inputs.buildprop_overrides != ''
         run: |
@@ -345,6 +357,7 @@ jobs:
           sudo umount mnt_system
           mv system.img.rw system.img
           rm -rf mnt_system
+          
       - name: Generate device-aware updater-script
         run: |
           cd work/firmware/raw_images
@@ -353,6 +366,7 @@ jobs:
             [ -f "$f" ] && echo "${f%.img}" >> partitions.list
           done
           cat partitions.list
+          
       - name: Assemble TWRP-flashable zip
         run: |
           mkdir -p work/twrp_zip/META-INF/com/google/android
@@ -376,6 +390,7 @@ jobs:
           echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
           cd work/twrp_zip
           zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable.zip" .
+          
       - name: Assemble stock (GApps-intact) TWRP-flashable zip
         if: inputs.debloat_google_apps == true && inputs.include_stock_zip == true
         run: |
@@ -400,6 +415,7 @@ jobs:
           echo "# placeholder — update-binary does the real work" > work/twrp_zip_stock/META-INF/com/google/android/updater-script
           cd work/twrp_zip_stock
           zip -r9 "../../${{ inputs.device_codename }}-twrp-flashable-stock.zip" .
+          
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
@@ -417,6 +433,7 @@ jobs:
           done
           cd ..
           ls -lh *.img.zip 2>/dev/null || echo "No raw images produced."
+          
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
