@@ -57,15 +57,9 @@ jobs:
             android-sdk-libsparse-utils \
             e2fsprogs
           pip3 install --user --break-system-packages liblp requests tqdm pyaxmlparser
-          # NOTE: the PyPI package is "liblp" (it installs the "lpunpack" CLI command) —
-          # a package literally named "lpunpack" does not exist on PyPI, hence the error.
-          # --break-system-packages is required on Ubuntu 24.04 runners (PEP 668).
-          # erofs-utils — needed only for newer devices; harmless to build even if unused
           git clone --depth=1 https://github.com/sekaiacg/erofs-utils.git
           cd erofs-utils && make -j"$(nproc)" && sudo make install
           cd ..
-          # persist ~/.local/bin (where --user pip installs put console scripts, e.g. lpunpack)
-          # onto PATH for every subsequent step in this job
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Download firmware
@@ -78,7 +72,6 @@ jobs:
       - name: Extract firmware archive
         run: |
           cd work/firmware
-          # handles both a plain zip wrapper (SamFirm/Frija) and a raw tar.md5
           if unzip -l firmware.zip >/dev/null 2>&1; then
             unzip firmware.zip -d extracted
           else
@@ -98,13 +91,10 @@ jobs:
         id: detect
         run: |
           cd work/firmware/extracted/ap_extracted
-          # Newer devices: dynamic partitions in a single super.img (raw or lz4)
           if ls super.img* >/dev/null 2>&1; then
             echo "layout=dynamic" >> "$GITHUB_OUTPUT"
-          # Mid-era devices: separate system.img/vendor.img, often lz4-compressed
           elif ls system.img* vendor.img* >/dev/null 2>&1; then
             echo "layout=legacy_split" >> "$GITHUB_OUTPUT"
-          # Old devices: plain ext4 sparse images, no compression, no vendor split
           else
             echo "layout=legacy_plain" >> "$GITHUB_OUTPUT"
           fi
@@ -143,15 +133,9 @@ jobs:
           mkdir -p magisk_extract
           unzip -o magisk.apk -d magisk_extract >/dev/null
 
-          # magiskboot/magiskinit are host tools — they run ON the CI runner, so they
-          # must match the RUNNER's arch (x86_64), never the target device's arch.
           cp magisk_extract/lib/x86_64/libmagiskboot.so magisk_extract/magiskboot
           cp magisk_extract/lib/x86_64/libmagiskinit.so magisk_extract/magiskinit
 
-          # magisk64/magisk32 are the payload binaries that get embedded in the patched
-          # boot image and actually run ON the device — bundling both covers 64-bit-only
-          # devices (arm64-v8a) and older 32-bit devices (armeabi-v7a) in one build.
-          # boot_patch.sh auto-selects the right one for the target device at flash/boot time.
           cp magisk_extract/lib/arm64-v8a/libmagisk64.so magisk_extract/magisk64
           cp magisk_extract/lib/armeabi-v7a/libmagisk32.so magisk_extract/magisk32
 
@@ -160,8 +144,6 @@ jobs:
           cp boot.img stock_boot.img
           export ASSETDIR="$(pwd)/magisk_extract/assets"
           export PATH="$(pwd)/magisk_extract:$PATH"
-          # KEEPVERITY/KEEPFORCEENCRYPT off is the common default for custom-flash setups;
-          # flip to true if your device needs stock verity/encryption behavior preserved
           KEEPVERITY=false KEEPFORCEENCRYPT=false sh boot_patch.sh boot.img
           if [ -f new-boot.img ]; then
             mv new-boot.img boot.img
@@ -185,7 +167,6 @@ jobs:
           cd ../raw_images
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
           lpunpack super.img.raw unpacked_super
-          # normalize: bring unpacked system/vendor/product images up to raw_images/
           find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
           rm -f super.img.raw
           ls -lh
@@ -216,7 +197,6 @@ jobs:
           for base in system cache hidden factoryfs; do
             f="${base}.img"
             if [ -f "$f" ]; then
-              # old sparse images need simg2img; plain ext4 ones pass through unchanged
               simg2img "$f" "../raw_images/${base}.img" 2>/dev/null || cp "$f" "../raw_images/${base}.img"
             fi
           done
@@ -234,8 +214,6 @@ jobs:
         run: |
           cd work/firmware/raw_images
 
-          # Real Google package IDs (from the app's AndroidManifest.xml), not folder
-          # names — folder names vary by OEM build and aren't reliable to match on.
           cat > /tmp/google_pkg_patterns.txt <<'EOF'
           com.google.android.gms
           com.google.android.gsf
@@ -279,7 +257,6 @@ jobs:
                       except Exception:
                           continue
                       if pkg in targets or any(pkg.startswith(t + ".") for t in targets):
-                          # remove the app's containing directory (covers base.apk + splits/oat/lib)
                           to_remove.append(dirpath)
                           print(f"MATCH  {pkg}  ->  {dirpath}")
 
@@ -290,10 +267,6 @@ jobs:
 
           cat > /tmp/patch_setupwizard_flag.sh <<'SHEOF'
           #!/bin/bash
-          # Tell the framework to skip the OOBE/setup-wizard gate outright, rather than
-          # relying on the SetupWizard app itself to mark setup complete. Without this,
-          # a device with Google's SetupWizard removed (or crashing) can get stuck at
-          # first boot because nothing ever flips the "setup complete" state.
           PROP_FILE="$1"
           for kv in \
             "ro.setupwizard.mode=DISABLED" \
@@ -361,8 +334,6 @@ jobs:
           else
             echo "No build.prop found on system.img."
           fi
-          # optional overlay: anything committed under overlay/system/ in the repo
-          # gets copied onto the mounted image before repacking (boot animations, extra apks, etc.)
           if [ -d "$GITHUB_WORKSPACE/overlay/system" ]; then
             sudo cp -r "$GITHUB_WORKSPACE/overlay/system/." mnt_system/
           fi
@@ -389,7 +360,6 @@ jobs:
           BIN=work/twrp_zip/META-INF/com/google/android/update-binary
           cat > "$BIN" <<'BINEOF'
           #!/sbin/sh
-          # Auto-generated flasher — partition-by-name dd, works across old and new layouts
           OUTFD=$2
           ZIPFILE=$3
           ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }
@@ -398,11 +368,8 @@ jobs:
           unzip -o "$ZIPFILE" -d /tmp/twrp_zip >/dev/null
           BINEOF
 
-          # substitute the device name in place of the placeholder — done outside any
-          # quoting context so there's nothing for a quote-counting bug to trip on
           sed -i "s/@@DEVICE@@/${DEVICE_CODENAME}/" "$BIN"
 
-          # append one dd line per detected partition
           while read -r part; do
             printf '[ -f /tmp/twrp_zip/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip/%s.img of=/dev/block/bootdevice/by-name/%s 2>/dev/null || true\n' \
               "$part" "$part" "$part" "$part" >> "$BIN"
@@ -430,7 +397,6 @@ jobs:
           BIN=work/twrp_zip_stock/META-INF/com/google/android/update-binary
           cat > "$BIN" <<'BINEOF'
           #!/sbin/sh
-          # Auto-generated flasher — partition-by-name dd, works across old and new layouts
           OUTFD=$2
           ZIPFILE=$3
           ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }
@@ -478,7 +444,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ inputs.device_codename }}-${{ github.run_number
+          tag_name: "${{ inputs.device_codename }}-${{ github.run_number }}"
           name: "${{ inputs.device_codename }} TWRP flashable (build ${{ github.run_number }})"
           body: |
             Auto-built from firmware source: ${{ inputs.firmware_url }}
@@ -519,3 +485,4 @@ jobs:
           base: main
           add-paths: "devices/${{ inputs.device_codename }}/**"
           delete-branch: true
+          
