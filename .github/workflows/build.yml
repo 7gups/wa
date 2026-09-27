@@ -132,23 +132,30 @@ jobs:
           fi
           echo "Detected layout: $(cat "$GITHUB_OUTPUT")"
 
-      - name: Decompress boot-chain images (all generations)
+      - name: Decompress and collect every partition image
         run: |
           cd work/firmware/extracted/ap_extracted
           mkdir -p ../../raw_images
-          for base in boot recovery vendor_boot dtbo dtb; do
-            for ext in img.lz4 img; do
-              f="${base}.${ext}"
-              if [ -f "$f" ]; then
-                if [[ "$f" == *.lz4 ]]; then
-                  lz4 -d "$f" "../../raw_images/${base}.img"
-                else
-                  cp "$f" "../../raw_images/${base}.img"
-                fi
-                break
-              fi
-            done
+
+          for f in *.img.lz4 *.img; do
+            [ -e "$f" ] || continue
+            case "$f" in
+              super.img|super.img.lz4) continue ;;
+            esac
+
+            if [[ "$f" == *.img.lz4 ]]; then
+              base="${f%.img.lz4}"
+              [ -f "../../raw_images/${base}.img" ] && continue
+              lz4 -d "$f" "../../raw_images/${base}.img.raw"
+              simg2img "../../raw_images/${base}.img.raw" "../../raw_images/${base}.img" 2>/dev/null \
+                || mv "../../raw_images/${base}.img.raw" "../../raw_images/${base}.img"
+              rm -f "../../raw_images/${base}.img.raw"
+            else
+              base="${f%.img}"
+              simg2img "$f" "../../raw_images/${base}.img" 2>/dev/null || cp "$f" "../../raw_images/${base}.img"
+            fi
           done
+          echo "Collected partition images:"
           ls -lh ../../raw_images
 
       - name: Unpack dynamic partitions (new devices, super.img)
@@ -165,39 +172,9 @@ jobs:
           simg2img super.img super.img.raw 2>/dev/null || mv super.img super.img.raw
           lpunpack super.img.raw unpacked_super
           find unpacked_super -maxdepth 1 -name '*.img' -exec cp {} . \;
-          rm -f super.img.raw
+          rm -f super.img.raw super.img
+          rm -rf unpacked_super
           ls -lh
-
-      - name: Decompress split system/vendor (mid-era devices)
-        if: steps.detect.outputs.layout == 'legacy_split'
-        run: |
-          cd work/firmware/extracted/ap_extracted
-          for base in system vendor cache; do
-            for ext in img.lz4 img; do
-              f="${base}.${ext}"
-              if [ -f "$f" ]; then
-                if [[ "$f" == *.lz4 ]]; then
-                  lz4 -d "$f" "../../raw_images/${base}.img"
-                else
-                  cp "$f" "../../raw_images/${base}.img"
-                fi
-                break
-              fi
-            done
-          done
-          ls -lh ../../raw_images
-
-      - name: Convert sparse ext4 images to raw (old plain-image devices)
-        if: steps.detect.outputs.layout == 'legacy_plain'
-        run: |
-          cd work/firmware/extracted/ap_extracted
-          for base in system cache hidden factoryfs; do
-            f="${base}.img"
-            if [ -f "$f" ]; then
-              simg2img "$f" "../../raw_images/${base}.img" 2>/dev/null || cp "$f" "../../raw_images/${base}.img"
-            fi
-          done
-          ls -lh ../../raw_images
 
       - name: Backup stock partition images (pre-GApps-removal)
         if: inputs.debloat_google_apps == true
@@ -510,3 +487,4 @@ jobs:
           base: main
           add-paths: "devices/${{ inputs.device_codename }}/**"
           delete-branch: true
+          
