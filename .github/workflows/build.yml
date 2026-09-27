@@ -11,6 +11,11 @@ on:
         description: 'Device codename (e.g. a52sxq, or i9300 for old devices)'
         required: true
         type: string
+      use_edify_updater:
+        description: 'Use the real Edify update-binary/updater-script format (needs assets/update-binary committed to the repo) instead of the built-in dd shell-script flasher'
+        required: false
+        type: boolean
+        default: false
       buildprop_overrides:
         description: 'Newline-separated key=value pairs to force into build.prop (optional)'
         required: false
@@ -228,7 +233,8 @@ jobs:
           echo "Detected partitions for $DEVICE_CODENAME:"
           cat partitions.list
 
-      - name: Write shared update-binary generator
+      - name: Write shared update-binary generator (legacy dd-shell procedure)
+        if: inputs.use_edify_updater != true
         run: |
           cat > /tmp/gen_update_binary.sh <<'GENEOF'
           #!/bin/bash
@@ -279,16 +285,62 @@ jobs:
           GENEOF
           chmod +x /tmp/gen_update_binary.sh
 
-      - name: Assemble TWRP-flashable zip
+      - name: Assemble TWRP-flashable zip (legacy dd-shell procedure)
+        if: inputs.use_edify_updater != true
         env:
           DEVICE_CODENAME: ${{ inputs.device_codename }}
         run: |
+          # Legacy procedure: update-binary is a plain #!/sbin/sh script that
+          # unzips itself into a staging dir and dd's each raw partition image
+          # straight to its by-name node, with a runtime fallback search across
+          # a few known by-name directory locations.
           mkdir -p work/twrp_zip/META-INF/com/google/android
           cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
 
           BIN=work/twrp_zip/META-INF/com/google/android/update-binary
           /tmp/gen_update_binary.sh "$BIN" /tmp/twrp_zip "$DEVICE_CODENAME" "" work/firmware/raw_images/partitions.list
           echo "# placeholder — update-binary does the real work" > work/twrp_zip/META-INF/com/google/android/updater-script
+
+          cd work/twrp_zip
+          zip -r9 "../../${DEVICE_CODENAME}-twrp-flashable.zip" .
+
+      - name: Assemble TWRP-flashable zip (Edify procedure)
+        if: inputs.use_edify_updater == true
+        env:
+          DEVICE_CODENAME: ${{ inputs.device_codename }}
+        run: |
+          # New procedure: a real prebuilt Edify interpreter as update-binary,
+          # paired with a proper Edify updater-script (assert + package_extract_file
+          # per partition) — the same format real TWRP/OTA flashable zips use.
+          UPDATE_BINARY_ASSET="$GITHUB_WORKSPACE/assets/update-binary"
+          if [ ! -f "$UPDATE_BINARY_ASSET" ]; then
+            echo "ERROR: $UPDATE_BINARY_ASSET not found."
+            echo "The Edify procedure needs a prebuilt updater (Edify interpreter)"
+            echo "binary committed to the repo at assets/update-binary. It's"
+            echo "device-agnostic (any ARM Android 7+ updater binary works) and only"
+            echo "needs to be added once. Alternatively, leave use_edify_updater off"
+            echo "to use the built-in dd shell-script procedure instead."
+            exit 1
+          fi
+
+          mkdir -p work/twrp_zip/META-INF/com/google/android
+          cp -r work/firmware/raw_images/*.img work/twrp_zip/ 2>/dev/null || true
+
+          cp "$UPDATE_BINARY_ASSET" work/twrp_zip/META-INF/com/google/android/update-binary
+          chmod 755 work/twrp_zip/META-INF/com/google/android/update-binary
+
+          SCRIPT=work/twrp_zip/META-INF/com/google/android/updater-script
+          {
+            printf 'assert(getprop("ro.product.device") == "%s" || getprop("ro.build.product") == "%s" || abort("E3004: This package is for device: %s; this device is " + getprop("ro.product.device") + "."));\n' \
+              "$DEVICE_CODENAME" "$DEVICE_CODENAME" "$DEVICE_CODENAME"
+            printf 'ui_print("Flashing %s stock firmware...");\n' "$DEVICE_CODENAME"
+            printf 'show_progress(0.900000, 0);\n'
+            while read -r part; do
+              printf 'package_extract_file("%s.img", "/dev/block/bootdevice/by-name/%s");\n' "$part" "$part"
+            done < work/firmware/raw_images/partitions.list
+            printf 'set_progress(1.000000);\n'
+            printf 'ui_print("Done. Reboot when ready.");\n'
+          } > "$SCRIPT"
 
           cd work/twrp_zip
           zip -r9 "../../${DEVICE_CODENAME}-twrp-flashable.zip" .
