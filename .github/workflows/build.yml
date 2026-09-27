@@ -326,12 +326,26 @@ jobs:
           ui_print "Flashing @@DEVICE@@ stock firmware..."
           mkdir -p /tmp/twrp_zip && cd /tmp/twrp_zip
           unzip -o "$ZIPFILE" -d /tmp/twrp_zip >/dev/null
+
+          BYNAME=""
+          for candidate in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
+            if [ -d "$candidate" ]; then
+              BYNAME="$candidate"
+              break
+            fi
+          done
+          if [ -z "$BYNAME" ]; then
+            ui_print "ERROR: no by-name partition directory found on this device."
+            ui_print "This device's SoC uses a partition layout this zip doesn't recognize."
+            exit 1
+          fi
+          ui_print "Using partition path: $BYNAME"
           BINEOF
 
           sed -i "s/@@DEVICE@@/${DEVICE_CODENAME}/" "$BIN"
 
           while read -r part; do
-            printf '[ -f /tmp/twrp_zip/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip/%s.img of=/dev/block/bootdevice/by-name/%s 2>/dev/null || true\n' \
+            printf '[ -f /tmp/twrp_zip/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip/%s.img of="$BYNAME"/%s 2>/dev/null || true\n' \
               "$part" "$part" "$part" "$part" >> "$BIN"
           done < work/firmware/raw_images/partitions.list
 
@@ -363,12 +377,26 @@ jobs:
           ui_print "Flashing @@DEVICE@@ stock firmware (GApps intact)..."
           mkdir -p /tmp/twrp_zip_stock && cd /tmp/twrp_zip_stock
           unzip -o "$ZIPFILE" -d /tmp/twrp_zip_stock >/dev/null
+
+          BYNAME=""
+          for candidate in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do
+            if [ -d "$candidate" ]; then
+              BYNAME="$candidate"
+              break
+            fi
+          done
+          if [ -z "$BYNAME" ]; then
+            ui_print "ERROR: no by-name partition directory found on this device."
+            ui_print "This device's SoC uses a partition layout this zip doesn't recognize."
+            exit 1
+          fi
+          ui_print "Using partition path: $BYNAME"
           BINEOF
 
           sed -i "s/@@DEVICE@@/${DEVICE_CODENAME}/" "$BIN"
 
           while read -r part; do
-            printf '[ -f /tmp/twrp_zip_stock/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip_stock/%s.img of=/dev/block/bootdevice/by-name/%s 2>/dev/null || true\n' \
+            printf '[ -f /tmp/twrp_zip_stock/%s.img ] && ui_print "Flashing %s..." && dd if=/tmp/twrp_zip_stock/%s.img of="$BYNAME"/%s 2>/dev/null || true\n' \
               "$part" "$part" "$part" "$part" >> "$BIN"
           done < work/firmware/raw_images/partitions.list
 
